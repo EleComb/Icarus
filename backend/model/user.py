@@ -2,7 +2,10 @@
 import hmac
 import os
 import time
-from typing import Union
+import traceback
+from typing import Union, Optional
+
+import peewee
 from peewee import *
 from playhouse.postgres_ext import ArrayField
 import config
@@ -13,7 +16,7 @@ from model.redis import redis, RK_USER_ACTCODE_BY_USER_ID, RK_USER_RESET_KEY_BY_
     RK_USER_LAST_REQUEST_RESET_KEY_BY_USER_ID, RK_USER_REG_CODE_BY_EMAIL, \
     RK_USER_REG_CODE_AVAILABLE_TIMES_BY_EMAIL, RK_USER_REG_PASSWORD
 from slim.base.user import BaseUser
-from slim.utils import StateObject, to_hex, to_bin
+from slim.utils import StateObject, to_hex, to_bin, get_bytes_from_blob
 from model import BaseModel, MyTimestampField, CITextField, db, INETField, SerialField
 
 
@@ -41,7 +44,7 @@ MAIN_ROLE_ORDER = ['admin', 'superuser', 'user', 'inactive_user', 'banned_user',
 class User(PostModel, BaseUser):
     email = TextField(index=True, unique=True, null=True, default=None)
     phone = TextField(index=True, unique=True, null=True, default=None)  # 大陆地区
-    nickname = CITextField(index=True, unique=True, null=True)  # CITextField
+    nickname = CITextField(index=True, unique=True, null=True, help_text='用户昵称')  # CITextField
     password = BlobField()
     salt = BlobField()  # auto
     biology = TextField(null=True)  # 简介
@@ -57,8 +60,6 @@ class User(PostModel, BaseUser):
     is_board_moderator = BooleanField(default=False, index=True)  # 是否为版主
     is_forum_master = BooleanField(default=False, index=True)  # 超版
 
-    key = BlobField(index=True, null=True)
-    key_time = MyTimestampField()  # 最后登录时间
     access_time = MyTimestampField(null=True, default=None)  # 最后访问时间，以misc为准吧
     last_check_in_time = MyTimestampField(null=True, default=None)  # 上次签到时间
     check_in_his = IntegerField(default=0)  # 连续签到天数
@@ -75,13 +76,58 @@ class User(PostModel, BaseUser):
 
     is_new_user = BooleanField(default=True)  # 是否全新用户（刚注册，未经过修改昵称）
     phone_verified = BooleanField(default=False)  # 手机号已确认
-    change_nickname_chance = IntegerField(default=0)  # 改名机会数量
-    reset_key = BlobField(index=True, null=True, default=None)  # 重置密码所用key
+    change_nickname_chance = IntegerField(default=0, help_text='改名机会数量')  # 改名机会数量
+    reset_key = BlobField(index=True, null=True, default=None, help_text='重置密码所用key')  # 重置密码所用key
 
     class Meta:
         db_table = 'user'
 
     #object_type = OBJECT_TYPES.USER
+
+    @classmethod
+    def new(cls, nickname, password, extra_values=None, *, auto_nickname=False, is_for_tests=True) -> Optional['User']:
+        values = {
+            'nickname': nickname,
+            'is_new_user': True
+            # 'is_for_tests': is_for_tests
+        }
+
+        values.update(extra_values)
+        cls.append_post_id(values)
+
+        info = cls.gen_password_and_salt(password)
+        values.update(info)
+
+        try:
+            uid = cls.insert(values).execute()
+            u: User = cls.get_by_pk(uid)
+
+            uchanged = False
+            # 如果是第一个用户，那么自动为管理员
+            if u.number == 1:
+                u.group = USER_GROUP.ADMIN
+                uchanged = True
+
+            # 注册成功后，如果要求自动设置用户名，那么修改用户名
+            if auto_nickname:
+                nprefix = config.USER_NICKNAME_AUTO_PREFIX + '_'
+                u.change_nickname_chance = 1
+                u.nickname = nprefix + uid.to_hex()
+                uchanged = True
+
+            if uchanged:
+                u.save()
+
+            return u
+        except peewee.IntegrityError:
+            traceback.print_exc()
+            db.rollback()
+            # if e.args[0].startswith('duplicate key | 错误:  重复键违反唯一约束'):
+            #     return
+            # 此处似乎无从得知，数据库会返回什么样的文本，应该是和语言相关
+            # 那么姑且假定 IntegrityError 都是唯一性约束
+        except peewee.DatabaseError:
+            db.rollback()
 
     @classmethod
     def find_by_nicknames(cls, names):
@@ -129,10 +175,6 @@ class User(PostModel, BaseUser):
         return ret
 
     @classmethod
-    def gen_id(cls):
-        return config.POST_ID_GENERATOR()
-
-    @classmethod
     def gen_password_and_salt(cls, password_text):
         salt = os.urandom(32)
         dk = hashlib.pbkdf2_hmac(
@@ -142,27 +184,6 @@ class User(PostModel, BaseUser):
             config.PASSWORD_SECURE_HASH_ITERATIONS,
         )
         return {'password': dk, 'salt': salt}
-
-    @classmethod
-    def gen_key(cls):
-        key = os.urandom(16)
-        key_time = int(time.time())
-        return {'key': key, 'key_time': key_time}
-
-    def refresh_key(self):
-        count = 0
-        while count < 10:
-            with db.atomic():
-                try:
-                    k = self.gen_key()
-                    self.key = k['key']
-                    self.key_time = k['key_time']
-                    self.save()
-                    return k
-                except DatabaseError:
-                    count += 1
-                    db.rollback()
-        raise ValueError("generate key failed")
 
     @classmethod
     def get_by_key(cls, key):
@@ -195,7 +216,7 @@ class User(PostModel, BaseUser):
         await pipe.execute()
 
     @classmethod
-    async def check_reg_code_by_email(cls, email, code):
+    async def check_reg_code_by_email(cls, email, code: Union[str, bytes]):
         """
         检查账户激活码是否可用
         :param uid:
@@ -296,8 +317,8 @@ class User(PostModel, BaseUser):
             self.exp += 5
             self.save()
 
-            ManageLog.add_by_credit_changed_sys(self.id.tobytes(), credit, self.credit, note='每日签到')
-            ManageLog.add_by_exp_changed_sys(self.id.tobytes(), exp, self.exp, note='每日签到')
+            ManageLog.add_by_credit_changed_sys(get_bytes_from_blob(self.id), credit, self.credit, note='每日签到')
+            ManageLog.add_by_exp_changed_sys(get_bytes_from_blob(self.id), exp, self.exp, note='每日签到')
 
             return {
                 'credit': 5,
@@ -315,7 +336,7 @@ class User(PostModel, BaseUser):
             exp = self.exp
             self.exp += 5
             self.save()
-            ManageLog.add_by_exp_changed_sys(self.id.tobytes(), exp, self.exp, note='每日登录')
+            ManageLog.add_by_exp_changed_sys(get_bytes_from_blob(self.id), exp, self.exp, note='每日登录')
             return {'exp': 5}
 
     def _auth_base(self, password_text):
@@ -327,27 +348,27 @@ class User(PostModel, BaseUser):
         dk = hashlib.pbkdf2_hmac(
             config.PASSWORD_SECURE_HASH_FUNC_NAME,
             password_text.encode('utf-8'),
-            self.salt.tobytes(),
+            get_bytes_from_blob(self.salt),
             config.PASSWORD_SECURE_HASH_ITERATIONS,
         )
 
-        if self.password.tobytes() == dk:
+        if get_bytes_from_blob(self.password) == dk:
             return self
 
     @classmethod
-    def auth_by_mail(cls, email, password_text):
+    def auth_by_mail(cls, email, password_text) -> ["User", bool]:
         try: u = cls.get(cls.email == email)
-        except DoesNotExist: return False
-        return u._auth_base(password_text)
+        except DoesNotExist: return None, False
+        return u, u._auth_base(password_text)
 
     @classmethod
-    def auth_by_nickname(cls, nickname, password_text):
-        try: u = cls.get(cls.nickname == nickname)
-        except DoesNotExist: return False
-        return u._auth_base(password_text)
+    def auth_by_username(cls, username, password_text) -> ["User", bool]:
+        try: u = cls.get(cls.username == username)
+        except DoesNotExist: return None, False
+        return u, u._auth_base(password_text)
 
     def __repr__(self):
-        return '<User id:%x nickname:%r>' % (int.from_bytes(self.id.tobytes(), 'big'), self.nickname)
+        return '<User id:%x nickname:%r>' % (int.from_bytes(get_bytes_from_blob(self.id), 'big'), self.nickname)
 
     @classmethod
     def get_post_type(cls):

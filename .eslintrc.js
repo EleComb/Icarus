@@ -20,14 +20,18 @@ module.exports = {
     'no-console': process.env.NODE_ENV === 'production' ? 'error' : 'off',
     'no-debugger': process.env.NODE_ENV === 'production' ? 'error' : 'off',
     // indent 4 spaces
-    'indent': ['error', 4, { 'SwitchCase': 1 }],
+    'indent': ['error', 2, { 'SwitchCase': 1 }],
     // allow paren-less arrow functions
     'arrow-parens': 0,
     // allow async-await
-    'generator-star-spacing': 0
+    'generator-star-spacing': 0,
+
+    'prefer-const': 0,
+    'quote-props': 0,
+    'dot-notation': 0
   },
   'globals': {
-      '$': true,
-      '_': true
+    '$': true,
+    '_': true
   }
 }

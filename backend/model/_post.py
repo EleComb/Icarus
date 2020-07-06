@@ -3,13 +3,17 @@
 """
 一些通用类的定义
 """
+import time
 from abc import abstractmethod
 from typing import Dict, Type, Optional
 
 from peewee import *
+
+import config
 from slim.base.sqlquery import DataRecord
 
 from config import POST_ID_GENERATOR
+from slim.utils import get_bytes_from_blob
 from slim.utils.customid import CustomID
 from slim.utils.state_obj import StateObject
 from model import BaseModel, MyTimestampField
@@ -121,17 +125,23 @@ class POST_TYPES(StateObject):
 
             # 按分类分别执行查询
             for i in m.select(*fields).where(m.id.in_(id_lst)):
-                ret[i.id.tobytes()] = i.get_title()
+                ret[get_bytes_from_blob(i.id)] = i.get_title()
 
         return ret
+
+
+def get_time():
+    return int(time.time())
 
 
 class PostModel(BaseModel):
     id = BlobField(primary_key=True, constraints=[SQL("DEFAULT int2bytea(nextval('id_gen_seq'))")])
     state = IntegerField(default=POST_STATE.NORMAL, index=True)
     visible = IntegerField(default=POST_VISIBLE.NORMAL, index=True)
-    time = MyTimestampField(index=True)  # 发布时间
+    time = MyTimestampField(index=True, default=get_time, help_text='发布时间')
     user_id = BlobField(index=True, null=True, default=None)  # 发布用户，对 user 表来说是推荐者，对 board 来说是创建者
+
+    # is_for_tests = BooleanField(default=False, help_text='单元测试标记，单元测试结束后删除')
 
     @classmethod
     @abstractmethod
@@ -146,9 +156,23 @@ class PostModel(BaseModel):
     def get_title(self):
         pass
 
+    @classmethod
+    def append_post_id(cls, values):
+        """
+        若有ID生成器，那么向values中添加生成出的值，若生成器为SQL Serial，则什么都不做
+        :param values:
+        :return:
+        """
+        if config.POST_ID_GENERATOR != config.SQLSerialGenerator:
+            values['id'] = config.POST_ID_GENERATOR().to_bin()
+
+
+def get_model_id():
+    return config.LONG_ID_GENERATOR().to_bin()
+
 
 class LongIdPostModel(PostModel):
-    id = BlobField(primary_key=True)
+    id = BlobField(primary_key=True, default=get_model_id)
 
     def get_title(self):
         """
@@ -156,6 +180,16 @@ class LongIdPostModel(PostModel):
         :return:
         """
         return None
+
+    @classmethod
+    def append_post_id(cls, values):
+        """
+        若有ID生成器，那么向values中添加生成出的值，若生成器为SQL Serial，则什么都不做
+        :param values:
+        :return:
+        """
+        if config.LONG_ID_GENERATOR != config.SQLSerialGenerator:
+            values['id'] = config.LONG_ID_GENERATOR().to_bin()
 
 
 def get_title_by_record(post_type, record: DataRecord):

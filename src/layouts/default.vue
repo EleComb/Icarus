@@ -35,7 +35,7 @@
     display: flex;
     > .main {
         flex: 1;
-        width: 0%;
+        width: 100%;
         padding-top: 25px;
         padding-bottom: 15px;
     }
@@ -49,13 +49,28 @@
 }
 </style>
 
-<script>
+<script lang="ts">
+// import {
+//   Component,
+//   Prop,
+//   Vue
+// } from "nuxt-property-decorator"
+
+// @Component({})
+// export default class Card extends Vue {
+//     test () {
+//     }
+// }
+// </script>
+
+<script lang="ts">
+import Vue from "vue"
 import Navbar from '@/components/misc/header.vue'
 import MyFooter from '@/components/misc/footer.vue'
 import MsgBox from '@/components/misc/msgbox.vue'
 import { mapState } from 'vuex'
 
-export default {
+export default Vue.extend({
     name: 'app',
     data () {
         return {}
@@ -78,6 +93,7 @@ export default {
                     (name !== 'wiki_article_new' && name !== 'wiki_article_edit')
                 )
             }
+            return false
         }
     },
     components: {
@@ -85,5 +101,5 @@ export default {
         MyFooter,
         MsgBox
     }
-}
+})
 </script>
